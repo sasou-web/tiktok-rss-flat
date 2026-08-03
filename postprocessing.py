@@ -24,11 +24,12 @@ flux existant : l'Action GitHub echoue et devient visiblement rouge.
 """
 
 import csv
+import json
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from feedgen.feed import FeedGenerator
@@ -82,6 +83,28 @@ def fetch_videos(user, count, attempts=3):
         if attempt < attempts:
             time.sleep(5 * attempt)
     raise RuntimeError(last_err or "extraction impossible")
+
+
+def oembed(video_url):
+    """Metadonnees publiques d'une video via l'API oEmbed de TikTok.
+
+    Deux raisons de l'appeler pour chaque video :
+      - la page de profil ne renvoie qu'une legende TRONQUEE ("... "), alors que
+        oEmbed donne le texte complet avec les hashtags ;
+      - l'extraction 'flat' omet souvent la miniature (constate en CI : 3 covers
+        sur 10), alors que oEmbed en fournit une systematiquement.
+    API publique, sans cle. En cas d'echec on retombe sur les donnees yt-dlp.
+    """
+    try:
+        req = Request(
+            "https://www.tiktok.com/oembed?url=" + quote(video_url, safe=""),
+            headers={"User-Agent": UA, "Accept": "application/json"},
+        )
+        with urlopen(req, timeout=20) as res:
+            return json.loads(res.read())
+    except Exception as err:  # noqa: BLE001 - repli sur les donnees yt-dlp
+        print(f"  oEmbed indisponible ({err})")
+        return {}
 
 
 def cover_url(entry):
@@ -139,9 +162,13 @@ def build_feed(user, entries):
     updated = None
     # Du plus recent au plus ancien : le bot retrie de son cote, mais un flux
     # ordonne reste plus lisible pour un lecteur RSS classique.
+    missing_cover = 0
     for entry in sorted(entries, key=lambda e: e.get("timestamp") or 0, reverse=True):
         link = f"https://tiktok.com/@{user}/video/{entry['id']}"
-        desc = (entry.get("title") or entry.get("description") or "").strip()
+        # oEmbed exige la forme canonique avec www, sinon il repond 400.
+        info = oembed(f"https://www.tiktok.com/@{user}/video/{entry['id']}")
+        # Legende : oEmbed en premier (texte complet), sinon la version tronquee.
+        desc = (info.get("title") or entry.get("title") or entry.get("description") or "").strip()
 
         fe = fg.add_entry(order="append")
         fe.id(link)
@@ -155,12 +182,20 @@ def build_feed(user, entries):
             fe.updated(published)
             updated = max(published, updated) if updated else published
 
-        content = desc[:255] if desc else "Sans description"
-        thumb = local_thumbnail(user, cover_url(entry))
+        # 500 caracteres (et non 255) pour que les hashtags de fin survivent :
+        # le bot Discord les detache de la legende pour les afficher en pied de carte.
+        content = desc[:500] if desc else "Sans description"
+        thumb = local_thumbnail(user, cover_url(entry) or info.get("thumbnail_url") or "")
         if thumb:
             content = f'<img src="{thumb}" / > {content}'
+        else:
+            missing_cover += 1
+            print(f"  ATTENTION : aucune miniature pour {link}")
         fe.description(content)
+        time.sleep(0.4)  # on espace les appels oEmbed, ~10 videos par execution
 
+    if missing_cover:
+        print(f"  {missing_cover} video(s) sans miniature (carte Discord sans image)")
     fg.updated(updated or datetime.now(timezone.utc))
     return fg
 
