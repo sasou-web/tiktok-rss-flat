@@ -1,37 +1,57 @@
 name: Flat
+
+# Regenere les flux RSS TikTok et les commit.
+#
+# Important : ce job doit ECHOUER (rouge) quand la recuperation echoue.
+# L'ancienne version faisait un `git commit --allow-empty` systematique, donc
+# l'Action restait verte alors que plus aucune video n'etait recuperee depuis
+# des semaines. Ici, `postprocessing.py` sort en code 1 si un compte ne renvoie
+# aucune video, et on ne commit que s'il y a vraiment des changements.
+
 on:
   push:
     branches:
       - main
   workflow_dispatch:
   schedule:
-    - cron: '10 */4 * * *'
+    - cron: "10 */4 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tiktok-rss
+  cancel-in-progress: false
+
 jobs:
   scheduled:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout repo content
-        uses: actions/checkout@v3 # checkout the repository content to github runner.
-      - name: setup python
-        uses: actions/setup-python@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.12 #install the python needed
-      - name: execute py script
-        env:
-          MS_TOKEN: ${{ secrets.MS_TOKEN }}
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # Pas de cache pip : on veut la derniere version de yt-dlp a chaque run,
+        # c'est ce qui permet au scraping de se reparer tout seul.
+        run: pip install --upgrade -r requirements.txt
+
+      - name: Generate RSS feeds
+        run: python postprocessing.py
+
+      - name: Commit and push
         run: |
-          export DISPLAY=:99
-          sudo Xvfb -ac :99 -screen 0 1280x1024x24 > /dev/null 2>&1 &
-          python3.12 -m venv venv
-          source venv/bin/activate
-          echo "VIRTUAL ENV:" $VIRTUAL_ENV
-          pip install playwright==1.40.0
-          pip install -r requirements.txt
-          python -m playwright install
-          # playwright install-deps
-          python postprocessing.py
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git add .
-          git commit --allow-empty -m "Latest TikTok RSS"
+          git add rss thumbnails
+          if git diff --cached --quiet; then
+            echo "Aucun changement : pas de nouvelle video depuis le dernier run."
+            exit 0
+          fi
+          git commit -m "Latest TikTok RSS"
+          git pull --rebase --autostash origin main
           git push

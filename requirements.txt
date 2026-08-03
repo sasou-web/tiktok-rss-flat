@@ -1,6 +1,10 @@
-playwright == 1.40.0
-asyncio
-feedgen
-TikTokApi
-config
+# yt-dlp fait tout le travail d'extraction : c'est un projet maintenu en continu
+# qui suit les changements de l'API TikTok (signatures, endpoints...).
+# Volontairement PAS epingle a une version exacte : une version figee cesse de
+# fonctionner des que TikTok change quelque chose. Le workflow reinstalle a
+# chaque execution et recupere donc les correctifs automatiquement.
+# L'extra curl-cffi active l'impersonation TLS (fiabilite face a l'anti-bot).
+yt-dlp[default,curl-cffi]>=2026.7.4
 
+# Generation du XML RSS.
+feedgen>=1.0.0
