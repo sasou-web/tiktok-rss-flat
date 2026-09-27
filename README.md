@@ -22,7 +22,9 @@ Generate usable RSS feeds from TikTok using GitHub Actions and GitHub Pages.
     * Edit config.py to change `ghPagesURL` and `ghRawURL` to your own repo URLs
     * Add the TikTok usernames that you like to subscriptions.csv
 
-* It's set to run once every 4 hours and generates one RSS XML file per user in the rss output directory.
+* It's set to run every 30 minutes and generates one RSS XML file per user in the rss output directory.
+* Source (septembre 2026) : l'embed officiel du profil (`https://www.tiktok.com/embed/@<user>`)
+  en priorité, yt-dlp en repli (yt-dlp échoue souvent depuis les IP de GitHub Actions).
 * Si l'Action passe au rouge, c'est que TikTok a encore changé quelque chose :
   la première chose à essayer est de relancer le workflow (yt-dlp est réinstallé
   à chaque exécution et récupère les correctifs upstream automatiquement).

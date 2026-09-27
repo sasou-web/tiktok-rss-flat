@@ -14,7 +14,9 @@ on:
       - main
   workflow_dispatch:
   schedule:
-    - cron: "10 */4 * * *"
+    # Toutes les 30 min (minutes decalees : GitHub retarde les crons a l'heure pile).
+    # Depot public = minutes Actions gratuites ; on ne commit que s'il y a du nouveau.
+    - cron: "7,37 * * * *"
 
 permissions:
   contents: write

@@ -9,6 +9,14 @@ Pourquoi ce script a été réécrit (aout 2026) :
   On passe donc par `yt-dlp`, qui est maintenu en continu et suit les
   changements de TikTok. Plus de msToken, plus de navigateur, plus de secret.
 
+Mise a jour septembre 2026 :
+  depuis fin aout, yt-dlp echoue la plupart du temps depuis les IP de GitHub
+  Actions (TikTok renvoie une reponse vide : "Failed to parse JSON"), d'ou des
+  flux en retard de plusieurs jours. La source principale est desormais l'embed
+  officiel du profil (https://www.tiktok.com/embed/@<user>), yt-dlp restant en
+  repli. Le bot Discord lit lui-meme cet embed : ce flux ne lui sert plus que de
+  secours.
+
 Sortie : un fichier `rss/<user>.xml` par compte, au MEME format qu'avant, pour
 que le bot Discord qui lit ces flux n'ait rien a changer :
   - <link>https://tiktok.com/@user/video/<id>  (le bot en extrait l'ID stable)
@@ -25,10 +33,12 @@ flux existant : l'Action GitHub echoue et devient visiblement rouge.
 
 import csv
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
@@ -50,6 +60,74 @@ UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+EMBED_STATE_RE = re.compile(
+    r'<script[^>]*id="__FRONTITY_CONNECT_STATE__"[^>]*>(.*?)</script>', re.S
+)
+
+
+def fetch_embed(user, count):
+    """Dernieres videos d'un profil via l'embed officiel TikTok (source principale).
+
+    https://www.tiktok.com/embed/@<user> est la page que charge tout site qui
+    integre un profil createur : bien moins protegee que l'API de listing
+    utilisee par yt-dlp (que TikTok bloque souvent depuis les IP de GitHub).
+    Elle contient deja la legende complete et une miniature 9:16 : pas besoin
+    d'oEmbed. Si elle echoue, les logs du workflow l'indiquent et yt-dlp prend
+    le relais.
+    L'embed ne donne pas l'heure de publication : on prend l'heure d'upload
+    encodee dans l'ID (32 bits de poids fort = timestamp Unix).
+    """
+    req = Request(
+        f"https://www.tiktok.com/embed/@{quote(user)}",
+        headers={"User-Agent": UA, "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"},
+    )
+    try:
+        with urlopen(req, timeout=30) as res:
+            html = res.read().decode("utf-8", "replace")
+    except HTTPError as err:
+        # Compte inexistant : HTTP 400 avec une page d'erreur exploitable.
+        html = err.read().decode("utf-8", "replace")
+    m = EMBED_STATE_RE.search(html)
+    if not m:
+        raise RuntimeError("page embed sans donnees (acces bloque ou format change)")
+    data = json.loads(m.group(1)).get("source", {}).get("data", {})
+    page = data.get(f"/embed/@{user}") or next(
+        (v for k, v in data.items() if k.startswith("/embed/") and isinstance(v, dict)), {}
+    )
+    if page.get("isError") or page.get("errorCode"):
+        raise RuntimeError(f"embed refuse (code {page.get('errorCode')}) : compte inexistant ou prive ?")
+
+    entries = []
+    for v in page.get("videoList") or []:
+        vid = str(v.get("id") or "")
+        if not vid.isdigit() or v.get("privateItem"):
+            continue
+        cover = v.get("originCoverUrl") or v.get("coverUrl") or ""
+        entries.append({
+            "id": vid,
+            "title": (v.get("desc") or "").strip(),
+            "timestamp": int(vid) >> 32,
+            "thumbnails": [{"id": "originCover", "url": cover}] if cover else [],
+            "full_caption": True,  # legende complete : oEmbed inutile
+        })
+    # Les videos epinglees (anciennes) sont en tete : on garde les plus recentes.
+    entries.sort(key=lambda e: int(e["id"]), reverse=True)
+    return entries[:count]
+
+
+def fetch_any(user, count):
+    """Embed d'abord (rapide, fiable), yt-dlp en repli."""
+    try:
+        entries = fetch_embed(user, count)
+        if entries:
+            print(f"  source : embed ({len(entries)} video(s))")
+            return entries
+        print("  embed : aucune video, repli sur yt-dlp")
+    except Exception as err:  # noqa: BLE001 - on tente yt-dlp
+        print(f"  embed indisponible ({err}), repli sur yt-dlp")
+    return fetch_videos(user, count)
 
 
 def fetch_videos(user, count, attempts=3):
@@ -166,7 +244,8 @@ def build_feed(user, entries):
     for entry in sorted(entries, key=lambda e: e.get("timestamp") or 0, reverse=True):
         link = f"https://tiktok.com/@{user}/video/{entry['id']}"
         # oEmbed exige la forme canonique avec www, sinon il repond 400.
-        info = oembed(f"https://www.tiktok.com/@{user}/video/{entry['id']}")
+        # Inutile pour l'embed, qui fournit deja legende complete et miniature.
+        info = {} if entry.get("full_caption") else oembed(f"https://www.tiktok.com/@{user}/video/{entry['id']}")
         # Legende : oEmbed en premier (texte complet), sinon la version tronquee.
         desc = (info.get("title") or entry.get("title") or entry.get("description") or "").strip()
 
@@ -192,7 +271,8 @@ def build_feed(user, entries):
             missing_cover += 1
             print(f"  ATTENTION : aucune miniature pour {link}")
         fe.description(content)
-        time.sleep(0.4)  # on espace les appels oEmbed, ~10 videos par execution
+        if not entry.get("full_caption"):
+            time.sleep(0.4)  # on espace les appels oEmbed, ~10 videos par execution
 
     if missing_cover:
         print(f"  {missing_cover} video(s) sans miniature (carte Discord sans image)")
@@ -215,7 +295,7 @@ def main():
     for user in users:
         print(f"Compte '{user}'")
         try:
-            entries = fetch_videos(user, VIDEO_COUNT)
+            entries = fetch_any(user, VIDEO_COUNT)
         except Exception as err:  # noqa: BLE001
             print(f"  ECHEC : {err}")
             print("  le flux existant est conserve tel quel.")
